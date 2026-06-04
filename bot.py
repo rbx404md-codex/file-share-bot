@@ -37,7 +37,7 @@ BACKUP_CHANNEL = -1003820862559
 ADMIN_IDS = [7294948308, 7370387694]
 BOT_USERNAME = "NebulaShareBot"
 DB_FILE = Path(__file__).parent / "database.json"
-SUPPORT_GROUP = "https://t.me/SkillShareBDCommunity"
+SUPPORT_CHANNEL = "https://t.me/Silent_Reaper_x"
 ADMIN_CONTACT = "@robiulxxxxxxx"
 DEFAULT_AUTO_DELETE = 20  # minutes
 
