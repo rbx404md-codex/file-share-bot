@@ -1,0 +1,7 @@
+aiogram
+#------optional-------
+aiohttp
+python-dotenv
+apscheduler
+requests
+pytz
