@@ -31,11 +31,11 @@ from aiogram.client.default import DefaultBotProperties
 #  CONFIGURATION
 # ═══════════════════════════════════════════════════════════════
 
-BOT_TOKEN = "your_bot_token"
-FILE_CHANNEL = -1003358175087
-BACKUP_CHANNEL = -1003358175087
-ADMIN_IDS = [6801360422, 1956820398]
-BOT_USERNAME = "filesbrobot"
+BOT_TOKEN = "8631065484:AAH7NipvhHUqXFJ4vnCeyEiMk6sI6lmNoQ4"
+FILE_CHANNEL = -1003820862559
+BACKUP_CHANNEL = -1003820862559
+ADMIN_IDS = [7294948308, 7370387694]
+BOT_USERNAME = "NebulaShareBot"
 DB_FILE = Path(__file__).parent / "database.json"
 SUPPORT_GROUP = "https://t.me/SkillShareBDCommunity"
 ADMIN_CONTACT = "@robiulxxxxxxx"
