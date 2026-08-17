@@ -4,7 +4,7 @@
 # ============================================================
 # Project Name : File Shear Bot Telegram 
 #
-# Developer    : @robiulxxxxxxx
+# Developer    : @RBX404
 # Telegram     : https://t.me/SkillShareBDCommunity
 # The author is not responsible for any misuse, abuse,
 # damages, or violations caused by this software.
@@ -32,13 +32,13 @@ from aiogram.client.default import DefaultBotProperties
 # ═══════════════════════════════════════════════════════════════
 
 BOT_TOKEN = "8631065484:AAH7NipvhHUqXFJ4vnCeyEiMk6sI6lmNoQ4"
-FILE_CHANNEL = -1003820862559
-BACKUP_CHANNEL = -1003820862559
-ADMIN_IDS = [7294948308, 7370387694]
+FILE_CHANNEL = -1004291342703
+BACKUP_CHANNEL = -1004291342703
+ADMIN_IDS = [7294948308, 8712336911]
 BOT_USERNAME = "NebulaShareBot"
 DB_FILE = Path(__file__).parent / "database.json"
-SUPPORT_CHANNEL = "https://t.me/Silent_Reaper_x"
-ADMIN_CONTACT = "@robiulxxxxxxx"
+SUPPORT_CHANNEL = "https://t.me/BlackoutZoneRBX404"
+ADMIN_CONTACT = "@RBX404"
 DEFAULT_AUTO_DELETE = 20  # minutes
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
