@@ -31,7 +31,7 @@ from aiogram.client.default import DefaultBotProperties
 #  CONFIGURATION
 # ═══════════════════════════════════════════════════════════════
 
-BOT_TOKEN = "8631065484:AAH7NipvhHUqXFJ4vnCeyEiMk6sI6lmNoQ4"
+BOT_TOKEN = "8631065484:AAGSsa-wDIqkr-kLK9UU8P_t6blejPvHe_w"
 FILE_CHANNEL = -1004291342703
 BACKUP_CHANNEL = -1004291342703
 ADMIN_IDS = [7294948308, 8712336911]
