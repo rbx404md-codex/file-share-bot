@@ -31,7 +31,7 @@ from aiogram.client.default import DefaultBotProperties
 #  CONFIGURATION
 # ═══════════════════════════════════════════════════════════════
 
-BOT_TOKEN = "8631065484:AAGSsa-wDIqkr-kLK9UU8P_t6blejPvHe_w"
+BOT_TOKEN = "8972144584:AAHkCfb6p8byxOg62LlSACOYStMapcOrxCg"
 FILE_CHANNEL = -1004291342703
 BACKUP_CHANNEL = -1004291342703
 ADMIN_IDS = [7294948308, 8712336911]
@@ -39,7 +39,7 @@ BOT_USERNAME = "NebulaShareBot"
 DB_FILE = Path(__file__).parent / "database.json"
 SUPPORT_CHANNEL = "https://t.me/BlackoutZoneRBX404"
 ADMIN_CONTACT = "@RBX404"
-DEFAULT_AUTO_DELETE = 20  # minutes
+DEFAULT_AUTO_DELETE = 30  # minutes
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
 logging.getLogger("aiogram").setLevel(logging.WARNING)
