@@ -56,7 +56,7 @@ def _env_int_list(name, default=None):
 # variables so they are never hardcoded in source. Fallbacks below match the
 # bot's previous configuration for backward compatibility, but you should set
 # real environment variables in production and rotate any previously exposed token.
-BOT_TOKEN = os.environ.get("8973219085:AAHl7wlmAI1tGLkePt-KCkEt7icHpzqos6c", "8973219085:AAHl7wlmAI1tGLkePt-KCkEt7icHpzqos6c")
+BOT_TOKEN = os.environ.get("8972144584:AAHkCfb6p8byxOg62LlSACOYStMapcOrxCg", "8972144584:AAHkCfb6p8byxOg62LlSACOYStMapcOrxCg")
 FILE_CHANNEL = _env_int("FILE_CHANNEL", -1004291342703)
 BACKUP_CHANNEL = _env_int("BACKUP_CHANNEL", -1004291342703)
 LOG_CHANNEL = _env_int("LOG_CHANNEL", None)  # NEW: optional separate admin log channel
