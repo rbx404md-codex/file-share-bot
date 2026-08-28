@@ -12,7 +12,7 @@
 # Use this project at your own risk.
 # ============================================================
 
-import json, os, asyncio, datetime, logging, string, random, html, io
+import json, os, asyncio, datetime, logging, string, random, html, io, re
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 
@@ -56,7 +56,7 @@ def _env_int_list(name, default=None):
 # variables so they are never hardcoded in source. Fallbacks below match the
 # bot's previous configuration for backward compatibility, but you should set
 # real environment variables in production and rotate any previously exposed token.
-BOT_TOKEN = os.environ.get("8972144584:AAHkCfb6p8byxOg62LlSACOYStMapcOrxCg", "8972144584:AAHkCfb6p8byxOg62LlSACOYStMapcOrxCg")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8972144584:AAHkCfb6p8byxOg62LlSACOYStMapcOrxCg")
 FILE_CHANNEL = _env_int("FILE_CHANNEL", -1004291342703)
 BACKUP_CHANNEL = _env_int("BACKUP_CHANNEL", -1004291342703)
 LOG_CHANNEL = _env_int("LOG_CHANNEL", None)  # NEW: optional separate admin log channel
@@ -77,6 +77,8 @@ EXPIRY_OPTIONS = {
 EXPIRY_LABELS = {"1h": "1 Hour", "1d": "1 Day", "7d": "7 Days", "30d": "30 Days", "never": "Never"}
 # NEW: preset download-limit choices shown in the UI (Unlimited/1/10/Custom)
 DLLIMIT_PRESETS = [("Unlimited", 0), ("1", 1), ("10", 10)]
+TRASH_RETENTION_DAYS = 7  # NEW: files sit in Recycle Bin this long before permanent auto-purge
+BACKUP_SIGNATURE = "FILEBRO_V3"  # NEW: used to validate imported backup files
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
 logging.getLogger("aiogram").setLevel(logging.WARNING)
@@ -151,6 +153,19 @@ class DB:
             if "last_accessed" not in f: f["last_accessed"] = None; changed = True
             if "collection_id" not in f: f["collection_id"] = None; changed = True
             if "meta" not in f: f["meta"] = {}; changed = True
+            # NEW: tags / recycle-bin / one-time-link / expiry-notification fields
+            if "tags" not in f: f["tags"] = []; changed = True
+            if "deleted" not in f: f["deleted"] = False; changed = True
+            if "deleted_at" not in f: f["deleted_at"] = None; changed = True
+            if "one_time" not in f: f["one_time"] = False; changed = True
+            if "expiry_notified" not in f: f["expiry_notified"] = False; changed = True
+        for uid, u in self.d.get("users", {}).items():
+            # NEW: personalization / notification prefs, recent-activity log
+            if "notify" not in u: u["notify"] = True; changed = True
+            if "def_privacy" not in u: u["def_privacy"] = "private"; changed = True
+            if "def_expiry" not in u: u["def_expiry"] = "never"; changed = True
+            if "def_folder" not in u: u["def_folder"] = None; changed = True
+            if "activity" not in u: u["activity"] = []; changed = True
         if changed:
             self.save()
 
@@ -178,7 +193,12 @@ class DB:
     def add_user(self, uid, name=""):
         k = str(uid)
         if k not in self.d["users"]:
-            self.d["users"][k] = {"lang":"","name":name,"join_date":now_iso(),"files_count":0,"total_downloads":0}
+            self.d["users"][k] = {
+                "lang":"","name":name,"join_date":now_iso(),"files_count":0,"total_downloads":0,
+                # NEW: personalization + notification prefs, recent-activity log
+                "notify": True, "def_privacy": "private", "def_expiry": "never", "def_folder": None,
+                "activity": [],
+            }
             self.save()
             return True
         if name and self.d["users"][k].get("name") != name:
@@ -214,29 +234,117 @@ class DB:
             self.d["banned"].remove(int(uid))
             self.save()
     def is_banned(self, uid): return int(uid) in self.d["banned"]
+
+    # ── NEW: personalization / notification settings ──────────────
+    def get_setting(self, uid, key, default=None):
+        u = self.get_user(uid)
+        return u.get(key, default) if u else default
+    def set_notify(self, uid, on):
+        if str(uid) in self.d["users"]:
+            self.d["users"][str(uid)]["notify"] = bool(on)
+            self.save()
+    def set_def_privacy(self, uid, val):
+        if str(uid) in self.d["users"]:
+            self.d["users"][str(uid)]["def_privacy"] = val
+            self.save()
+    def set_def_expiry(self, uid, val):
+        if str(uid) in self.d["users"]:
+            self.d["users"][str(uid)]["def_expiry"] = val
+            self.save()
+    def set_def_folder(self, uid, folder_id):
+        if str(uid) in self.d["users"]:
+            self.d["users"][str(uid)]["def_folder"] = folder_id
+            self.save()
+
+    # ── NEW: recent activity log (per user, capped at 20 entries) ──
+    def log_activity(self, uid, kind, fid=None, label=""):
+        u = self.d["users"].get(str(uid))
+        if not u: return
+        act = u.setdefault("activity", [])
+        act.insert(0, {"kind": kind, "fid": fid, "label": label[:40], "ts": now_iso()})
+        del act[20:]
+        self.save()
+    def user_activity(self, uid, limit=10):
+        u = self.get_user(uid)
+        return (u.get("activity", []) if u else [])[:limit]
     
     def save_file(self, fid, msg_id, uid, ftype, fname, caption, public=False,
-                  folder_id=None, collection_id=None, meta=None):
+                  folder_id=None, collection_id=None, meta=None, tags=None,
+                  expiry_type="never", one_time=False):
+        secs = EXPIRY_OPTIONS.get(expiry_type)
         self.d["files"][fid] = {
             "message_id": msg_id, "user_id": int(uid), "file_type": ftype,
             "file_name": fname or "Untitled", "caption": caption or "",
             "upload_date": now_iso(), "is_public": public,
             "password": None, "force_join": None, "downloads": 0,
             # NEW fields (all default to "off"/unlimited so old behavior is unchanged)
-            "folder_id": folder_id, "expiry_type": "never", "expires_at": None,
+            "folder_id": folder_id, "expiry_type": expiry_type, "expires_at":
+                ((datetime.datetime.utcnow() + datetime.timedelta(seconds=secs)).isoformat() if secs else None),
             "download_limit": 0, "views": 0, "last_accessed": None,
             "collection_id": collection_id, "meta": meta or {},
+            "tags": tags or [], "deleted": False, "deleted_at": None,
+            "one_time": bool(one_time), "expiry_notified": False,
         }
         self.inc_files(uid)
+        self.log_activity(uid, "upload", fid, fname or "Untitled")
         self.save()
 
-    def get_file(self, fid): return self.d["files"].get(fid)
+    def get_file(self, fid):
+        f = self.d["files"].get(fid)
+        return f if (f and not f.get("deleted")) else None  # trashed files are hidden from normal lookups
+    def get_file_any(self, fid):
+        return self.d["files"].get(fid)  # NEW: includes trashed files (for trash panel)
     def del_file(self, fid):
+        # Permanent delete (used from Trash > Delete Forever, and by cleanup jobs)
         if fid in self.d["files"]:
             del self.d["files"][fid]
             self.save()
             return True
         return False
+    def trash_file(self, fid):
+        # NEW: soft delete — moves the file to the Recycle Bin instead of erasing it
+        if fid in self.d["files"]:
+            self.d["files"][fid]["deleted"] = True
+            self.d["files"][fid]["deleted_at"] = now_iso()
+            self.save()
+            return True
+        return False
+    def restore_file(self, fid):
+        if fid in self.d["files"]:
+            self.d["files"][fid]["deleted"] = False
+            self.d["files"][fid]["deleted_at"] = None
+            self.save()
+            return True
+        return False
+    def user_trash(self, uid, page=0, pp=8):
+        fs = [(k, v) for k, v in self.d["files"].items() if v["user_id"] == int(uid) and v.get("deleted")]
+        fs.sort(key=lambda x: x[1].get("deleted_at",""), reverse=True)
+        return fs[page*pp:(page+1)*pp], len(fs)
+    def purge_old_trash(self, days=7):
+        # NEW: permanently remove files that have sat in Trash past the retention window
+        cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=days)
+        purged = []
+        for fid, f in list(self.d["files"].items()):
+            if not f.get("deleted") or not f.get("deleted_at"): continue
+            try:
+                if datetime.datetime.fromisoformat(f["deleted_at"]) < cutoff:
+                    purged.append((fid, f))
+                    del self.d["files"][fid]
+            except Exception:
+                continue
+        if purged: self.save()
+        return purged
+
+    # ── NEW: tags ────────────────────────────────────────────────
+    def set_tags(self, fid, tags):
+        if fid in self.d["files"]:
+            clean = sorted({t.strip().lstrip("#").lower()[:20] for t in tags if t.strip()})
+            self.d["files"][fid]["tags"] = clean
+            self.save()
+    def set_one_time(self, fid, on):
+        if fid in self.d["files"]:
+            self.d["files"][fid]["one_time"] = bool(on)
+            self.save()
     def set_pw(self, fid, pw):
         if fid in self.d["files"]:
             self.d["files"][fid]["password"] = pw
@@ -290,7 +398,7 @@ class DB:
             self.d["files"][fid]["folder_id"] = folder_id
             self.save()
     def folder_files(self, uid, folder_id, page=0, pp=8):
-        fs = [(k, v) for k, v in self.d["files"].items() if v["user_id"] == int(uid) and v.get("folder_id") == folder_id]
+        fs = [(k, v) for k, v in self.d["files"].items() if v["user_id"] == int(uid) and v.get("folder_id") == folder_id and not v.get("deleted")]
         fs.sort(key=lambda x: x[1].get("upload_date",""), reverse=True)
         return fs[page*pp:(page+1)*pp], len(fs)
 
@@ -322,7 +430,7 @@ class DB:
     def is_favorite(self, uid, fid): return fid in self.d["favorites"].get(str(uid), [])
     def user_favorites(self, uid, page=0, pp=8):
         fids = self.d["favorites"].get(str(uid), [])
-        fs = [(fid, self.d["files"][fid]) for fid in fids if fid in self.d["files"]]
+        fs = [(fid, self.d["files"][fid]) for fid in fids if fid in self.d["files"] and not self.d["files"][fid].get("deleted")]
         fs.sort(key=lambda x: x[1].get("upload_date",""), reverse=True)
         return fs[page*pp:(page+1)*pp], len(fs)
 
@@ -341,7 +449,24 @@ class DB:
         try: return datetime.datetime.utcnow() > datetime.datetime.fromisoformat(f["expires_at"])
         except Exception: return False
     def expired_file_ids(self):
-        return [fid for fid, f in self.d["files"].items() if f.get("expires_at") and self.is_expired(fid)]
+        return [fid for fid, f in self.d["files"].items() if not f.get("deleted") and f.get("expires_at") and self.is_expired(fid)]
+    def soon_expiring(self, window_seconds=3600):
+        # NEW: files expiring within `window_seconds` that haven't been notified yet
+        out = []
+        now = datetime.datetime.utcnow()
+        for fid, f in self.d["files"].items():
+            if f.get("deleted") or not f.get("expires_at") or f.get("expiry_notified"): continue
+            try:
+                exp = datetime.datetime.fromisoformat(f["expires_at"])
+            except Exception:
+                continue
+            if now <= exp <= now + datetime.timedelta(seconds=window_seconds):
+                out.append((fid, f))
+        return out
+    def mark_expiry_notified(self, fid):
+        if fid in self.d["files"]:
+            self.d["files"][fid]["expiry_notified"] = True
+            self.save()
 
     # ── NEW: Download limits ─────────────────────────────────────
     def set_dl_limit(self, fid, limit):
@@ -360,25 +485,28 @@ class DB:
         self.save()
     def is_maintenance(self): return bool(self.d["settings"].get("maintenance", False))
     def user_files(self, uid, page=0, pp=8):
-        fs = [(k,v) for k,v in self.d["files"].items() if v["user_id"]==int(uid)]
+        fs = [(k,v) for k,v in self.d["files"].items() if v["user_id"]==int(uid) and not v.get("deleted")]
         fs.sort(key=lambda x: x[1].get("upload_date",""), reverse=True)
         return fs[page*pp:(page+1)*pp], len(fs)
     def public_files(self, page=0, pp=8):
-        fs = [(k,v) for k,v in self.d["files"].items() if v.get("is_public")]
+        fs = [(k,v) for k,v in self.d["files"].items() if v.get("is_public") and not v.get("deleted")]
         fs.sort(key=lambda x: x[1].get("upload_date",""), reverse=True)
         return fs[page*pp:(page+1)*pp], len(fs)
     def trending(self, limit=10):
-        fs = [(k,v) for k,v in self.d["files"].items() if v.get("is_public")]
+        fs = [(k,v) for k,v in self.d["files"].items() if v.get("is_public") and not v.get("deleted")]
         fs.sort(key=lambda x: x[1].get("downloads",0), reverse=True)
         return fs[:limit]
-    def search(self, q, uid=None, page=0, pp=8, ftype=None, sort="downloads"):
+    def search(self, q, uid=None, page=0, pp=8, ftype=None, sort="downloads", tag=None):
         q = q.lower()
         rs = []
         for fid, f in self.d["files"].items():
+            if f.get("deleted"): continue  # NEW: never surface trashed files
             if uid and f["user_id"] != int(uid): continue
             if not uid and not f.get("is_public"): continue
             if ftype and f.get("file_type") != ftype: continue  # NEW: file-type filter
-            if q in (f.get("file_name") or "").lower() or q in (f.get("caption") or "").lower():
+            if tag and tag.lower() not in [x.lower() for x in f.get("tags", [])]: continue  # NEW: tag filter
+            if q in (f.get("file_name") or "").lower() or q in (f.get("caption") or "").lower() \
+               or any(q in x.lower() for x in f.get("tags", [])):
                 rs.append((fid, f))
         # NEW: sort by newest or most-downloaded (default: most-downloaded, unchanged)
         if sort == "newest":
@@ -387,10 +515,10 @@ class DB:
             rs.sort(key=lambda x: x[1].get("downloads",0), reverse=True)
         return rs[page*pp:(page+1)*pp], len(rs)
     
-    def file_count(self): return len(self.d["files"])
+    def file_count(self): return sum(1 for f in self.d["files"].values() if not f.get("deleted"))
     def today_files(self):
         td = datetime.datetime.utcnow().strftime("%Y-%m-%d")
-        return sum(1 for f in self.d["files"].values() if f.get("upload_date","").startswith(td))
+        return sum(1 for f in self.d["files"].values() if not f.get("deleted") and f.get("upload_date","").startswith(td))
     def total_dl(self): return sum(f.get("downloads",0) for f in self.d["files"].values())
     def get_adel(self): return self.d["settings"].get("auto_delete_minutes", DEFAULT_AUTO_DELETE)
     def set_adel(self, m):
@@ -543,6 +671,52 @@ T = {
     "dash_hdr": "📈 <b>Dashboard</b>\n\n𐙚 Files: <b>{fc}</b>\n↧ Downloads received: <b>{dl}</b>\n⭐ Favorites: <b>{favc}</b>\n🗂 Collections: <b>{colc}</b>",
     "b_dashboard": "📈 Dashboard",
     "smart_info_line": "\n\n🧾 <b>File info:</b>\n{lines}",
+    # ── NEW: v3 premium features ──────────────────────────────────
+    "b_recent": "🕒 Recent Activity", "b_trash": "🗑 Trash", "b_restore": "📥 Import Backup",
+    "b_cleanup": "🧹 Cleanup Now", "b_share": "📤 Share", "b_security": "🔐 Security",
+    "b_tags": "🏷 Tags", "b_yes": "✅ Yes", "b_no": "❌ No", "b_notify_on": "🔔 Notifications: ON",
+    "b_notify_off": "🔕 Notifications: OFF", "b_def_privacy": "🔏 Default Privacy",
+    "b_def_expiry": "⏳ Default Expiry", "b_def_folder": "🗂 Default Folder", "b_onetime": "🎯 One-time Link",
+    # Recent activity
+    "recent_hdr": "🕒 <b>Recent Activity</b>",
+    "no_activity": "🕒 Nothing here yet — your recent uploads and downloads will show up here.",
+    "act_upload": "📥 Uploaded", "act_download": "⬇️ Downloaded",
+    # Trash / recycle bin
+    "trash_hdr": "🗑 <b>Recycle Bin</b> (Page {p}/{tp})\nFiles are kept for {days} days before permanent deletion.",
+    "no_trash": "🗑 Recycle Bin is empty.",
+    "trashed_ok": "🗑 Moved to Trash. You can restore it within {days} days.",
+    "restored_ok": "♻️ File restored.",
+    "perm_del_confirm": "⚠️ <b>Permanently delete this file?</b>\nThis cannot be undone.",
+    "perm_del_ok": "␡ Permanently deleted.",
+    "b_restore_file": "♻️ Restore", "b_perm_del": "⚠️ Delete Forever",
+    # Tags
+    "ask_tags": "🏷 <b>Send tags</b> for this file, separated by spaces or commas (e.g. <code>movie hindi 2024</code>). Send <code>remove</code> to clear tags.",
+    "tags_set": "✧ Tags updated: {t}",
+    "tags_cleared": "✧ Tags cleared.",
+    # One-time link
+    "onetime_set": "🎯 One-time access link {s}.",
+    "onetime_used": "🎯 <b>This was a one-time link and has already been used.</b>",
+    # Security panel
+    "security_hdr": "🔐 <b>Security & Access</b> — {fn}",
+    # Share panel
+    "share_hdr": "📤 <b>Share</b> — {fn}\n\n⚲ <code>{link}</code>\n\nSend this link to anyone, or use the button below to share it directly in a Telegram chat.",
+    # Settings / personalization
+    "settings_hdr": "⚙️ <b>Settings</b>",
+    "def_privacy_set": "✧ Default privacy set to <b>{v}</b>.",
+    "def_expiry_set": "✧ Default expiry set to <b>{v}</b>.",
+    "def_folder_set": "✧ Default folder set to <b>{v}</b>.",
+    "notify_on_msg": "🔔 Notifications turned ON.",
+    "notify_off_msg": "🔕 Notifications turned OFF.",
+    # Notifications sent proactively
+    "notif_expiring": "⏳ <b>Heads up!</b>\nYour file <b>{fn}</b> will expire soon ({c}).",
+    "notif_dllimit": "🔢 <b>Download limit reached</b>\nYour file <b>{fn}</b> has hit its download limit and is no longer accessible via its link.",
+    # Backup import (restore)
+    "restore_ask": "📥 <b>Send the backup .json file</b> to restore.\n⚠️ This will overwrite ALL current bot data.",
+    "restore_invalid": "𖹭 That doesn't look like a valid backup file for this bot.",
+    "restore_confirm": "⚠️ <b>Confirm restore</b>\n\n👤 Users in backup: <b>{u}</b>\n𐙚 Files in backup: <b>{f}</b>\n🗓 Backup date: {d}\n\nThis will <b>replace all current data</b>. Continue?",
+    "restore_done": "✧ <b>Restore complete.</b> Bot data has been replaced from the backup.",
+    "restore_cancelled": "✧ Restore cancelled — current data was not changed.",
+    "cleanup_done": "🧹 <b>Cleanup complete.</b>\n⏳ Expired files removed: <b>{e}</b>\n🗑 Old trash purged: <b>{tr}</b>",
 },
 "bn": {
     "welcome_new": "ᯓᡣ𐭩 <b>{bot}-এ স্বাগতম!</b>\n\nআমি আপনার ফাইল সংরক্ষণ করে স্থায়ী লিংক তৈরি করতে পারি।\n\n⌾ <b>আপনার ভাষা নির্বাচন করুন:</b>",
@@ -901,47 +1075,69 @@ def user_kb(uid):
     rows = [
         [btn(tb(uid,"b_files"), "uf:0", style=S_PRIMARY),
          btn(tb(uid,"b_search"), "us", style=S_PRIMARY)],
-        [btn(tb(uid,"b_pub"), "upf:0", style=S_SUCCESS),
-         btn(tb(uid,"b_trend"), "ut", style=S_SUCCESS)],
-        # NEW: folders, favorites, dashboard
         [btn(tb(uid,"b_folders"), "ufo:0", style=S_PRIMARY),
          btn(tb(uid,"b_myfavs"), "ufav:0", style=S_PRIMARY)],
-        [btn(tb(uid,"b_dashboard"), "udash", style=S_SUCCESS)],
-        [btn(tb(uid,"b_set"), "uset"),
-         btn(tb(uid,"b_help"), "uh")],
+        [btn(tb(uid,"b_pub"), "upf:0", style=S_SUCCESS),
+         btn(tb(uid,"b_trend"), "ut", style=S_SUCCESS)],
+        # NEW: dashboard, recent activity, trash grouped together
+        [btn(tb(uid,"b_dashboard"), "udash", style=S_SUCCESS),
+         btn(tb(uid,"b_recent"), "urec")],
+        [btn(tb(uid,"b_trash"), "utr:0"),
+         btn(tb(uid,"b_set"), "uset")],
+        [btn(tb(uid,"b_help"), "uh")],
     ]
     if adm: rows.append([btn(tb(uid,"b_admin"), "ap", style=S_DANGER)])
     rows.append([btn(tb(uid,"b_close"), "close", style=S_DANGER)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def admin_kb(uid):
+    # NEW: reorganized, categorized admin control panel
     maint = db.is_maintenance()
-    maint_label = "🛠 Maintenance: ON" if maint else "🛠 Maintenance: OFF"
+    maint_label = ("🔴" if maint else "🟢") + f" Maintenance: {'ON' if maint else 'OFF'}"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [btn(tb(uid,"b_stats"), "as", style=S_PRIMARY), btn(tb(uid,"b_bc"), "abc", style=S_SUCCESS)],
-        [btn(tb(uid,"b_users"), "au"), btn(tb(uid,"b_bk"), "abk", style=S_PRIMARY)],
-        [btn(tb(uid,"b_bset"), "aset"), btn(tb(uid,"b_info"), "aui")],
-        [btn(maint_label, "a_maint", style=S_DANGER if maint else S_SUCCESS)],  # NEW
+        [btn("━━ 📊 Overview ━━", "as", style=S_PRIMARY)],
+        [btn(tb(uid,"b_stats"), "as", style=S_PRIMARY), btn(tb(uid,"b_users"), "au", style=S_PRIMARY)],
+        [btn("━━ 📢 Outreach ━━", "abc")],
+        [btn(tb(uid,"b_bc"), "abc", style=S_SUCCESS), btn(tb(uid,"b_info"), "aui")],
+        [btn("━━ 💾 Data ━━", "abk")],
+        [btn(tb(uid,"b_bk"), "abk", style=S_PRIMARY), btn(tb(uid,"b_restore"), "arestore", style=S_PRIMARY)],
+        [btn(tb(uid,"b_cleanup"), "a_cleanup")],
+        [btn("━━ ⚙️ Control ━━", "aset")],
+        [btn(tb(uid,"b_bset"), "aset"), btn(maint_label, "a_maint", style=S_DANGER if maint else S_SUCCESS)],
         [btn(tb(uid,"b_back"), "up", style=S_DANGER)],
     ])
 
 def file_kb(uid, fid):
+    # NEW: reorganized "File Details Panel" — grouped into logical sections
     f = db.get_file(fid)
     if not f: return None
     vis = tb(uid,"b_mkpriv") if f.get("is_public") else tb(uid,"b_mkpub")
-    pw_l = "⚿ ✧" if f.get("password") else tb(uid,"b_pw")
-    fj_l = "⚑ ✧" if f.get("force_join") else tb(uid,"b_fj")
-    exp_l = tb(uid,"b_expiry") + (f" [{EXPIRY_LABELS.get(f.get('expiry_type','never'),'Never')}]" if f.get("expiry_type","never")!="never" else "")
-    lim = f.get("download_limit", 0)
-    lim_l = tb(uid,"b_dllimit") + (f" [{lim}]" if lim else "")
+    tag_l = tb(uid,"b_tags") + (f" [{len(f.get('tags') or [])}]" if f.get("tags") else "")
     return InlineKeyboardMarkup(inline_keyboard=[
-        [btn(tb(uid,"b_link"), f"fl:{fid}", style=S_SUCCESS), btn(pw_l, f"fp:{fid}")],
-        [btn(vis, f"fv:{fid}", style=S_PRIMARY), btn(tb(uid,"b_cap"), f"fc:{fid}")],
-        [btn(fj_l, f"ffj:{fid}"), btn(tb(uid,"b_del"), f"fd:{fid}", style=S_DANGER)],
-        # NEW: analytics, folder move, expiry, download-limit
-        [btn(tb(uid,"b_analytics"), f"fan:{fid}"), btn(tb(uid,"b_move"), f"fmv:{fid}")],
-        [btn(exp_l, f"fex:{fid}"), btn(lim_l, f"fdl:{fid}")],
+        [btn(tb(uid,"b_link"), f"fl:{fid}", style=S_SUCCESS), btn(tb(uid,"b_share"), f"fsh:{fid}", style=S_SUCCESS)],
+        [btn(tb(uid,"b_analytics"), f"fan:{fid}"), btn(tag_l, f"ftag:{fid}")],
+        [btn(vis, f"fv:{fid}", style=S_PRIMARY), btn(tb(uid,"b_move"), f"fmv:{fid}")],
+        [btn(tb(uid,"b_security"), f"fsec:{fid}", style=S_PRIMARY), btn(tb(uid,"b_cap"), f"fc:{fid}")],
+        [btn(tb(uid,"b_del"), f"fd:{fid}", style=S_DANGER)],
         [btn(tb(uid,"b_back"), "uf:0", style=S_DANGER)],
+    ])
+
+def file_security_kb(uid, fid):
+    # NEW: consolidated Security & Access panel (password / force-join / expiry / limit / one-time)
+    f = db.get_file(fid)
+    if not f: return None
+    pw_l = "⚿ ✧ Password: Set" if f.get("password") else "⚿ Set Password"
+    fj_l = "⚑ ✧ Force-Join: Set" if f.get("force_join") else "⚑ Set Force-Join"
+    exp_l = "⏳ Expiry: " + EXPIRY_LABELS.get(f.get("expiry_type","never"), "Never")
+    lim = f.get("download_limit", 0)
+    lim_l = "🔢 Dl. Limit: " + ("Unlimited" if not lim else str(lim))
+    ot_l = ("🎯 One-time: ON ✅" if f.get("one_time") else "🎯 One-time: OFF")
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [btn(pw_l, f"fp:{fid}")],
+        [btn(fj_l, f"ffj:{fid}")],
+        [btn(exp_l, f"fex:{fid}"), btn(lim_l, f"fdl:{fid}")],
+        [btn(ot_l, f"fot:{fid}")],
+        [btn(tb(uid,"b_back"), f"fi:{fid}", style=S_DANGER)],
     ])
 
 def search_filter_kb(uid):
@@ -960,12 +1156,13 @@ def search_filter_kb(uid):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def public_file_kb(uid, fid, link):
-    # NEW: shown to non-owners viewing a public file — includes Favorite toggle
+    # NEW: shown to non-owners viewing a public file — includes Favorite toggle + Share
     is_fav = db.is_favorite(uid, fid)
     fav_btn = btn(tb(uid,"b_fav_rm"), f"favrm:{fid}", style=S_DANGER) if is_fav else btn(tb(uid,"b_fav_add"), f"favadd:{fid}", style=S_SUCCESS)
+    share_url = f"https://t.me/share/url?url={link}"
     return InlineKeyboardMarkup(inline_keyboard=[
         [btn(tb(uid,"b_dl"), url=link, style=S_SUCCESS)],
-        [fav_btn],
+        [fav_btn, btn(tb(uid,"b_share"), url=share_url)],
         [btn(tb(uid,"b_back"), "up", style=S_DANGER)],
     ])
 
@@ -993,6 +1190,15 @@ def finfo_text(uid, fid, f):
     if meta:
         lines = "\n".join(f"• {k}: {esc(v)}" for k, v in meta.items())
         txt += t(uid, "smart_info_line", lines=lines)
+    # NEW: tags + expiry status shown right in the details panel
+    tags = f.get("tags") or []
+    if tags:
+        txt += "\n\n🏷 " + " ".join(f"#{esc(x)}" for x in tags)
+    exp_type = f.get("expiry_type", "never")
+    if exp_type != "never":
+        txt += f"\n⏳ Expires: {EXPIRY_LABELS.get(exp_type,'')}"
+    if f.get("one_time"):
+        txt += "\n🎯 One-time access link"
     return txt
 
 def upanel_text(uid, name):
@@ -1057,6 +1263,8 @@ router = Router()
 media_group_buffer: Dict[str, Dict[str, Any]] = {}
 # NEW: ephemeral per-user search filter selections (scope/type/sort), reset on restart
 search_filters: Dict[int, Dict[str, Any]] = {}
+# NEW: admin backup-restore payloads awaiting confirmation (uid -> parsed backup "data" dict)
+pending_restore: Dict[int, Dict[str, Any]] = {}
 
 async def _process_media_group(group_id: str):
     await asyncio.sleep(1.5)  # debounce: wait for all items of the album to arrive
@@ -1072,17 +1280,19 @@ async def _process_media_group(group_id: str):
         if not fobj:
             continue
         fname = getattr(fobj, 'file_name', None) or f"{ftype}_{gen_id(4)}"
-        caption = m.caption or ""
+        caption = m.html_text or ""  # NEW: html_text preserves entities (bold/italic, premium & custom emoji)
         meta = extract_meta(fobj, ftype)
-        user_log = f"👤 <b>{esc(m.from_user.full_name)}</b> (<code>{uid}</code>)\n𖧷 {esc(fname)}\n{'─'*30}"
-        ch_caption = f"{user_log}\n\n{caption}" if caption else user_log
         try:
+            # NEW: no injected uploader "tag" — original caption/entities (incl.
+            # premium & custom emoji) and thumbnail are preserved untouched.
             sent = await bot_obj.copy_message(
-                chat_id=FILE_CHANNEL, from_chat_id=uid, message_id=m.message_id,
-                caption=ch_caption, parse_mode=ParseMode.HTML
+                chat_id=FILE_CHANNEL, from_chat_id=uid, message_id=m.message_id
             )
             fid = gen_id(10)
-            db.save_file(fid, sent.message_id, uid, ftype, fname, caption, meta=meta)
+            u = db.get_user(uid) or {}
+            db.save_file(fid, sent.message_id, uid, ftype, fname, caption, meta=meta,
+                         public=(u.get("def_privacy","private")=="public"),
+                         folder_id=u.get("def_folder"), expiry_type=u.get("def_expiry","never"))
             saved_fids.append(fid)
         except Exception as e:
             log.error(f"batch save err: {e}")
@@ -1128,6 +1338,10 @@ async def send_file(bot_obj: Bot, uid: int, fid: str, f: dict):
         try: await bot_obj.send_message(uid, t(uid, "expired_gone"))
         except: pass
         return False
+    if f.get("one_time") and f.get("downloads", 0) >= 1:  # NEW: one-time link already used
+        try: await bot_obj.send_message(uid, t(uid, "onetime_used"))
+        except: pass
+        return False
     if db.dl_limit_reached(fid):
         try: await bot_obj.send_message(uid, t(uid, "dllimit_reached"))
         except: pass
@@ -1141,6 +1355,13 @@ async def send_file(bot_obj: Bot, uid: int, fid: str, f: dict):
         db.inc_fdl(fid)
         up = f.get("user_id")
         if up: db.inc_dl(up)
+        db.log_activity(uid, "download", fid, f.get("file_name", "Untitled"))  # NEW: recent activity
+
+        # NEW: notify the owner exactly once when their file's download limit is hit
+        f2 = db.get_file(fid)
+        if f2 and db.dl_limit_reached(fid) and up and db.get_setting(up, "notify", True):
+            try: await bot_obj.send_message(up, t(up, "notif_dllimit", fn=esc(f2.get("file_name","Untitled"))))
+            except Exception: pass
 
         mins = db.get_adel()
         link = f"https://t.me/{BOT_USERNAME}?start={fid}"
@@ -1262,6 +1483,36 @@ async def handle_upload(msg: Message):
     db.add_user(uid, msg.from_user.full_name)
     
     st = get_state(uid)
+
+    # NEW: admin restore-from-backup — intercept a .json document sent while awaiting one
+    if st.get("action") == "await_restore" and is_admin(uid):
+        prompt_id = st.get("prompt_id")
+        if prompt_id:
+            try: await msg.bot.delete_message(uid, prompt_id)
+            except: pass
+        clear_state(uid)
+        if not msg.document:
+            await msg.answer(t(uid,"restore_invalid"))
+            return
+        try:
+            file_info = await msg.bot.get_file(msg.document.file_id)
+            buf = await msg.bot.download_file(file_info.file_path)
+            payload = json.loads(buf.read().decode("utf-8"))
+        except Exception as e:
+            await msg.answer(t(uid,"restore_invalid"))
+            return
+        if not isinstance(payload, dict) or "data" not in payload or "users" not in payload.get("data", {}) or "files" not in payload.get("data", {}):
+            await msg.answer(t(uid,"restore_invalid"))
+            return
+        pending_restore[uid] = payload["data"]
+        ucount = len(payload["data"].get("users", {}))
+        fcount = len(payload["data"].get("files", {}))
+        await msg.answer(
+            t(uid,"restore_confirm", u=ucount, f=fcount, d=payload.get("date","?")),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_yes"), "arestore_yes", style=S_DANGER), btn(tb(uid,"b_no"), "arestore_no", style=S_SUCCESS)]])
+        )
+        return
+
     if st.get("action") == "bc_msg" and is_admin(uid):
         prompt_id = st.get("prompt_id")
         if prompt_id:
@@ -1297,19 +1548,22 @@ async def handle_upload(msg: Message):
     fobj, ftype = get_ftype(msg)
     if not fobj: return
     fname = getattr(fobj, 'file_name', None) or f"{ftype}_{gen_id(4)}"
-    caption = msg.html_text if msg.text else (msg.caption or "")
+    caption = msg.html_text or ""  # NEW: html_text works for both text & caption, preserving premium/custom emoji entities
     meta = extract_meta(fobj, ftype)  # NEW: smart file info
 
-    user_log = f"👤 <b>{esc(msg.from_user.full_name)}</b> (<code>{uid}</code>)\n𖧷 {esc(fname)}\n{'─'*30}"
-    ch_caption = f"{user_log}\n\n{caption}" if caption else user_log
-
     try:
+        # NEW: copy_message without overriding "caption" keeps the original caption's
+        # entities intact (bold/italic, premium & custom emoji, etc.) and the file's
+        # own thumbnail/cover image is preserved automatically since the media itself
+        # is copied — no uploader "tag"/label is injected into the saved file anymore.
         sent = await msg.bot.copy_message(
-            chat_id=FILE_CHANNEL, from_chat_id=uid, message_id=msg.message_id,
-            caption=ch_caption, parse_mode=ParseMode.HTML
+            chat_id=FILE_CHANNEL, from_chat_id=uid, message_id=msg.message_id
         )
         fid = gen_id(10)
-        db.save_file(fid, sent.message_id, uid, ftype, fname, caption, meta=meta)
+        u = db.get_user(uid) or {}
+        db.save_file(fid, sent.message_id, uid, ftype, fname, caption, meta=meta,
+                     public=(u.get("def_privacy","private")=="public"),
+                     folder_id=u.get("def_folder"), expiry_type=u.get("def_expiry","never"))
         f = db.get_file(fid)
         link = f"https://t.me/{BOT_USERNAME}?start={fid}"
         text = finfo_text(uid, fid, f) + f"\n\n⚲ <code>{link}</code>"
@@ -1374,11 +1628,9 @@ async def handle_text(msg: Message):
         f = db.get_file(fid)
         if f:
             try:
-                uploader = db.get_user(f.get("user_id"))
-                u_name = uploader.get("name", "Unknown") if uploader else "Unknown"
-                user_log = f"👤 <b>{esc(u_name)}</b> (<code>{f.get('user_id')}</code>)\n𖧷 {esc(f.get('file_name', 'Untitled'))}\n{'─'*30}"
-                ch_caption = f"{user_log}\n\n{cap}" if cap else user_log
-                await msg.bot.edit_message_caption(FILE_CHANNEL, f["message_id"], caption=ch_caption, parse_mode=ParseMode.HTML)
+                # NEW: no uploader "tag"/label injected — edited caption is saved as-is
+                # (msg.html_text preserves custom-emoji entities the user typed/pasted).
+                await msg.bot.edit_message_caption(FILE_CHANNEL, f["message_id"], caption=cap or None, parse_mode=ParseMode.HTML)
             except: pass
         await msg.answer(t(uid,"cap_ok"))
         return
@@ -1481,6 +1733,25 @@ async def handle_text(msg: Message):
         await msg.answer(t(uid,"dllimit_set", c=("Unlimited" if n==0 else n)))
         return
 
+    # NEW: tag editing
+    if action == "set_tags":
+        try: await msg.delete()
+        except: pass
+        fid = st.get("fid")
+        clear_state(uid)
+        f = db.get_file(fid)
+        if not f or (f["user_id"]!=uid and not is_admin(uid)):
+            await msg.answer(t(uid,"not_found"))
+            return
+        if text.strip().lower() == "remove":
+            db.set_tags(fid, [])
+            await msg.answer(t(uid,"tags_cleared"))
+            return
+        tags = re.split(r"[,\s]+", text.strip())
+        db.set_tags(fid, tags)
+        f = db.get_file(fid)
+        await msg.answer(t(uid,"tags_set", t=" ".join(f"#{esc(x)}" for x in f.get("tags", [])) or "—"))
+        return
 
     if action == "bc_msg":
         clear_state(uid)
@@ -1831,10 +2102,201 @@ async def cb_handler(cq: CallbackQuery):
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_back"),"up",style=S_DANGER)]]))
             return
 
+        # NEW: Recent activity
+        if data == "urec":
+            acts = db.user_activity(uid, limit=10)
+            if not acts:
+                await cq.message.edit_text(t(uid,"no_activity"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_back"),"up",style=S_DANGER)]]))
+                return
+            lines = []
+            for a in acts:
+                icon = t(uid, "act_upload") if a["kind"]=="upload" else t(uid, "act_download")
+                lines.append(f"• {icon} — {esc(a.get('label',''))} ({fmt_dt(a.get('ts',''))})")
+            await cq.message.edit_text(t(uid,"recent_hdr")+"\n\n"+"\n".join(lines),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_back"),"up",style=S_DANGER)]]))
+            return
+
+        # NEW: Recycle bin / trash
+        if data.startswith("utr:"):
+            pg = int(data.split(":")[1])
+            files, total = db.user_trash(uid, page=pg)
+            pages = max(1, (total+7)//8)
+            if not files:
+                await cq.message.edit_text(t(uid,"no_trash"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_back"),"up",style=S_DANGER)]]))
+                return
+            rows = [[btn(f"🗑 {(f.get('file_name','Untitled'))[:28]}", f"tri:{fid}")] for fid, f in files]
+            nav = []
+            if pg > 0: nav.append(btn(tb(uid,"b_prev"), f"utr:{pg-1}"))
+            if pg < pages-1: nav.append(btn(tb(uid,"b_next"), f"utr:{pg+1}"))
+            if nav: rows.append(nav)
+            rows.append([btn(tb(uid,"b_back"), "up", style=S_DANGER)])
+            await cq.message.edit_text(t(uid,"trash_hdr", p=pg+1, tp=pages, days=TRASH_RETENTION_DAYS), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+            return
+
+        if data.startswith("tri:"):
+            fid = data.split(":")[1]
+            f = db.get_file_any(fid)
+            if not f or (f["user_id"]!=uid and not is_admin(uid)) or not f.get("deleted"): return
+            await cq.message.edit_text(
+                f"🗑 <b>{esc(f.get('file_name','Untitled'))}</b>\nDeleted: {fmt_dt(f.get('deleted_at',''))}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [btn(tb(uid,"b_restore_file"), f"trest:{fid}", style=S_SUCCESS)],
+                    [btn(tb(uid,"b_perm_del"), f"tpd:{fid}", style=S_DANGER)],
+                    [btn(tb(uid,"b_back"), "utr:0", style=S_DANGER)],
+                ]))
+            return
+
+        if data.startswith("trest:"):
+            fid = data.split(":")[1]
+            f = db.get_file_any(fid)
+            if not f or (f["user_id"]!=uid and not is_admin(uid)): return
+            db.restore_file(fid)
+            await cq.answer(t(uid,"restored_ok"), show_alert=True)
+            await cq.message.edit_text(t(uid,"restored_ok"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_back"),"utr:0",style=S_DANGER)]]))
+            return
+
+        if data.startswith("tpd:"):
+            fid = data.split(":")[1]
+            f = db.get_file_any(fid)
+            if not f or (f["user_id"]!=uid and not is_admin(uid)): return
+            await cq.message.edit_text(t(uid,"perm_del_confirm"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_yes"), f"tpdc:{fid}", style=S_DANGER), btn(tb(uid,"b_no"), f"tri:{fid}", style=S_SUCCESS)]]))
+            return
+
+        if data.startswith("tpdc:"):
+            fid = data.split(":")[1]
+            f = db.get_file_any(fid)
+            if not f or (f["user_id"]!=uid and not is_admin(uid)): return
+            try: await cq.message.bot.delete_message(FILE_CHANNEL, f["message_id"])
+            except: pass
+            db.del_file(fid)
+            await cq.message.edit_text(t(uid,"perm_del_ok"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_back"),"utr:0",style=S_DANGER)]]))
+            await log_event(cq.message.bot, f"␡ <b>File permanently deleted</b>\nBy: <code>{uid}</code>\n𖧷 {esc(f.get('file_name',''))}")
+            return
+
+        # NEW: Settings panel (personalization)
         if data == "uset":
             lang = db.get_lang(uid)
-            await cq.message.edit_text(f"𖣠 <b>{bf('Settings')}</b>\n\n⌾ Language: {LANG_FLAGS.get(lang,'⌾')} {LANG_NAMES.get(lang, lang)}",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_lang"), "ulang", style=S_PRIMARY)],[btn(tb(uid,"b_back"), "up", style=S_DANGER)]]))
+            u = db.get_user(uid) or {}
+            notify = u.get("notify", True)
+            dp = u.get("def_privacy","private")
+            de = u.get("def_expiry","never")
+            df = u.get("def_folder")
+            fo = db.get_folder(df) if df else None
+            df_lbl = fo["name"] if fo else "Uncategorized"
+            await cq.message.edit_text(t(uid,"settings_hdr")+f"\n\n⌾ Language: {LANG_FLAGS.get(lang,'⌾')} {LANG_NAMES.get(lang, lang)}\n🔏 Default privacy: {dp}\n⏳ Default expiry: {EXPIRY_LABELS.get(de,'Never')}\n🗂 Default folder: {esc(df_lbl)}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [btn(tb(uid,"b_lang"), "ulang", style=S_PRIMARY)],
+                    [btn(tb(uid,"b_notify_off") if notify else tb(uid,"b_notify_on"), "usetnotify")],
+                    [btn(tb(uid,"b_def_privacy"), "usetpriv")],
+                    [btn(tb(uid,"b_def_expiry"), "usetexp")],
+                    [btn(tb(uid,"b_def_folder"), "usetfold:0")],
+                    [btn(tb(uid,"b_back"), "up", style=S_DANGER)],
+                ]))
+            return
+
+        if data == "usetnotify":
+            u = db.get_user(uid) or {}
+            new_val = not u.get("notify", True)
+            db.set_notify(uid, new_val)
+            await cq.answer(t(uid,"notify_on_msg") if new_val else t(uid,"notify_off_msg"), show_alert=True)
+            data = "uset"  # fall through to redraw settings panel
+
+        if data == "uset":  # redrawn after a settings change above
+            lang = db.get_lang(uid)
+            u = db.get_user(uid) or {}
+            notify = u.get("notify", True)
+            dp = u.get("def_privacy","private")
+            de = u.get("def_expiry","never")
+            df = u.get("def_folder")
+            fo = db.get_folder(df) if df else None
+            df_lbl = fo["name"] if fo else "Uncategorized"
+            await cq.message.edit_text(t(uid,"settings_hdr")+f"\n\n⌾ Language: {LANG_FLAGS.get(lang,'⌾')} {LANG_NAMES.get(lang, lang)}\n🔏 Default privacy: {dp}\n⏳ Default expiry: {EXPIRY_LABELS.get(de,'Never')}\n🗂 Default folder: {esc(df_lbl)}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [btn(tb(uid,"b_lang"), "ulang", style=S_PRIMARY)],
+                    [btn(tb(uid,"b_notify_off") if notify else tb(uid,"b_notify_on"), "usetnotify")],
+                    [btn(tb(uid,"b_def_privacy"), "usetpriv")],
+                    [btn(tb(uid,"b_def_expiry"), "usetexp")],
+                    [btn(tb(uid,"b_def_folder"), "usetfold:0")],
+                    [btn(tb(uid,"b_back"), "up", style=S_DANGER)],
+                ]))
+            return
+
+        if data == "usetpriv":
+            rows = [[btn("🔏 Private", "usetpriv:private"), btn("⌾ Public", "usetpriv:public")], [btn(tb(uid,"b_back"), "uset", style=S_DANGER)]]
+            await cq.message.edit_text(t(uid,"b_def_privacy"), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+            return
+        if data.startswith("usetpriv:"):
+            v = data.split(":")[1]
+            db.set_def_privacy(uid, v)
+            await cq.answer(t(uid,"def_privacy_set", v=v), show_alert=True)
+            data = "uset"
+
+        if data == "usetexp":
+            rows = [[btn(lbl, f"usetexp:{k}")] for k, lbl in EXPIRY_LABELS.items()]
+            rows.append([btn(tb(uid,"b_back"), "uset", style=S_DANGER)])
+            await cq.message.edit_text(t(uid,"b_def_expiry"), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+            return
+        if data.startswith("usetexp:"):
+            v = data.split(":")[1]
+            if v in EXPIRY_OPTIONS:
+                db.set_def_expiry(uid, v)
+                await cq.answer(t(uid,"def_expiry_set", v=EXPIRY_LABELS[v]), show_alert=True)
+            data = "uset"
+
+        if data == "uset":  # redraw once more if a priv/expiry change happened above
+            lang = db.get_lang(uid)
+            u = db.get_user(uid) or {}
+            notify = u.get("notify", True)
+            dp = u.get("def_privacy","private")
+            de = u.get("def_expiry","never")
+            df = u.get("def_folder")
+            fo = db.get_folder(df) if df else None
+            df_lbl = fo["name"] if fo else "Uncategorized"
+            await cq.message.edit_text(t(uid,"settings_hdr")+f"\n\n⌾ Language: {LANG_FLAGS.get(lang,'⌾')} {LANG_NAMES.get(lang, lang)}\n🔏 Default privacy: {dp}\n⏳ Default expiry: {EXPIRY_LABELS.get(de,'Never')}\n🗂 Default folder: {esc(df_lbl)}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [btn(tb(uid,"b_lang"), "ulang", style=S_PRIMARY)],
+                    [btn(tb(uid,"b_notify_off") if notify else tb(uid,"b_notify_on"), "usetnotify")],
+                    [btn(tb(uid,"b_def_privacy"), "usetpriv")],
+                    [btn(tb(uid,"b_def_expiry"), "usetexp")],
+                    [btn(tb(uid,"b_def_folder"), "usetfold:0")],
+                    [btn(tb(uid,"b_back"), "up", style=S_DANGER)],
+                ]))
+            return
+
+        if data.startswith("usetfold:"):
+            pg = int(data.split(":")[1])
+            folders = db.user_folders(uid)
+            rows = [[btn(f"🗂 {v['name']}", f"usetfoldset:{k}")] for k, v in folders[pg*8:(pg+1)*8]]
+            rows.append([btn(tb(uid,"b_uncat"), "usetfoldset:none")])
+            rows.append([btn(tb(uid,"b_back"), "uset", style=S_DANGER)])
+            await cq.message.edit_text(t(uid,"b_def_folder"), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+            return
+        if data.startswith("usetfoldset:"):
+            v = data.split(":")[1]
+            folder_id = None if v == "none" else v
+            db.set_def_folder(uid, folder_id)
+            fo = db.get_folder(folder_id) if folder_id else None
+            await cq.answer(t(uid,"def_folder_set", v=(fo["name"] if fo else "Uncategorized")), show_alert=True)
+            data = "uset"
+
+        if data == "uset":  # final redraw after folder change
+            lang = db.get_lang(uid)
+            u = db.get_user(uid) or {}
+            notify = u.get("notify", True)
+            dp = u.get("def_privacy","private")
+            de = u.get("def_expiry","never")
+            df = u.get("def_folder")
+            fo = db.get_folder(df) if df else None
+            df_lbl = fo["name"] if fo else "Uncategorized"
+            await cq.message.edit_text(t(uid,"settings_hdr")+f"\n\n⌾ Language: {LANG_FLAGS.get(lang,'⌾')} {LANG_NAMES.get(lang, lang)}\n🔏 Default privacy: {dp}\n⏳ Default expiry: {EXPIRY_LABELS.get(de,'Never')}\n🗂 Default folder: {esc(df_lbl)}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [btn(tb(uid,"b_lang"), "ulang", style=S_PRIMARY)],
+                    [btn(tb(uid,"b_notify_off") if notify else tb(uid,"b_notify_on"), "usetnotify")],
+                    [btn(tb(uid,"b_def_privacy"), "usetpriv")],
+                    [btn(tb(uid,"b_def_expiry"), "usetexp")],
+                    [btn(tb(uid,"b_def_folder"), "usetfold:0")],
+                    [btn(tb(uid,"b_back"), "up", style=S_DANGER)],
+                ]))
             return
 
         if data == "ulang":
@@ -1859,6 +2321,45 @@ async def cb_handler(cq: CallbackQuery):
             await cq.message.edit_text(txt, reply_markup=kb, disable_web_page_preview=True)
             return
 
+        # NEW: Share panel
+        if data.startswith("fsh:"):
+            fid = data.split(":")[1]
+            f = db.get_file(fid)
+            if not f: return
+            link = f"https://t.me/{BOT_USERNAME}?start={fid}"
+            share_url = f"https://t.me/share/url?url={link}&text={f.get('file_name','')}"
+            await cq.message.edit_text(t(uid,"share_hdr", fn=esc(f.get("file_name","Untitled")), link=link),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_share"), url=share_url, style=S_SUCCESS)],[btn(tb(uid,"b_back"), f"fi:{fid}", style=S_DANGER)]]),
+                disable_web_page_preview=True)
+            return
+
+        # NEW: Tags
+        if data.startswith("ftag:"):
+            fid = data.split(":")[1]
+            f = db.get_file(fid)
+            if not f or (f["user_id"]!=uid and not is_admin(uid)): return
+            set_state(uid, "set_tags", fid=fid, prompt_id=cq.message.message_id)
+            await cq.message.edit_text(t(uid,"ask_tags"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_cancel"), f"fi:{fid}", style=S_DANGER)]]))
+            return
+
+        # NEW: Security panel (consolidated password/force-join/expiry/limit/one-time)
+        if data.startswith("fsec:"):
+            fid = data.split(":")[1]
+            f = db.get_file(fid)
+            if not f or (f["user_id"]!=uid and not is_admin(uid)): return
+            await cq.message.edit_text(t(uid,"security_hdr", fn=esc(f.get("file_name","Untitled"))), reply_markup=file_security_kb(uid, fid))
+            return
+
+        if data.startswith("fot:"):
+            fid = data.split(":")[1]
+            f = db.get_file(fid)
+            if not f or (f["user_id"]!=uid and not is_admin(uid)): return
+            new_val = not f.get("one_time", False)
+            db.set_one_time(fid, new_val)
+            await cq.answer(t(uid,"onetime_set", s="enabled" if new_val else "disabled"), show_alert=True)
+            await cq.message.edit_text(t(uid,"security_hdr", fn=esc(f.get("file_name","Untitled"))), reply_markup=file_security_kb(uid, fid))
+            return
+
         if data.startswith("fl:"):
             fid = data[3:]
             await cq.message.bot.send_message(uid, f"⚲ <b>Link:</b>\n\n<code>https://t.me/{BOT_USERNAME}?start={fid}</code>", disable_web_page_preview=True)
@@ -1869,7 +2370,7 @@ async def cb_handler(cq: CallbackQuery):
             f = db.get_file(fid)
             if not f or (f["user_id"]!=uid and not is_admin(uid)): return
             set_state(uid, "set_pw", fid=fid, prompt_id=cq.message.message_id)
-            await cq.message.edit_text(t(uid,"ask_pw"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_cancel"),f"fi:{fid}",style=S_DANGER)]]))
+            await cq.message.edit_text(t(uid,"ask_pw"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_cancel"),f"fsec:{fid}",style=S_DANGER)]]))
             return
 
         if data.startswith("fv:"):
@@ -1896,7 +2397,7 @@ async def cb_handler(cq: CallbackQuery):
             f = db.get_file(fid)
             if not f or (f["user_id"]!=uid and not is_admin(uid)): return
             set_state(uid, "set_fj", fid=fid, prompt_id=cq.message.message_id)
-            await cq.message.edit_text(t(uid,"ask_fj"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_cancel"),f"fi:{fid}",style=S_DANGER)]]))
+            await cq.message.edit_text(t(uid,"ask_fj"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_cancel"),f"fsec:{fid}",style=S_DANGER)]]))
             return
 
         if data.startswith("fd:"):
@@ -1907,14 +2408,13 @@ async def cb_handler(cq: CallbackQuery):
             return
 
         if data.startswith("fdc:"):
+            # NEW: soft delete — moves the file to Trash instead of erasing it immediately
             fid = data[4:]
             f = db.get_file(fid)
             if not f or (f["user_id"]!=uid and not is_admin(uid)): return
-            try: await cq.message.bot.delete_message(FILE_CHANNEL, f["message_id"])
-            except: pass
-            db.del_file(fid)
-            await cq.message.edit_text(t(uid,"del_ok"))
-            await log_event(cq.message.bot, f"␡ <b>File deleted</b>\nBy: <code>{uid}</code>\n𖧷 {esc(f.get('file_name',''))}")  # NEW
+            db.trash_file(fid)
+            await cq.message.edit_text(t(uid,"trashed_ok", days=TRASH_RETENTION_DAYS), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_back"),"uf:0",style=S_DANGER)]]))
+            await log_event(cq.message.bot, f"🗑 <b>File moved to Trash</b>\nBy: <code>{uid}</code>\n𖧷 {esc(f.get('file_name',''))}")  # NEW
             return
 
         if data.startswith("vfj:"):
@@ -2022,6 +2522,46 @@ async def cb_handler(cq: CallbackQuery):
                 await cq.message.edit_text(f"𖹭 Backup failed: {esc(str(e))}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_back"),"ap",style=S_DANGER)]]))
             return
 
+        # NEW: import/restore backup from the admin panel
+        if data == "arestore":
+            set_state(uid, "await_restore", prompt_id=cq.message.message_id)
+            await cq.message.edit_text(t(uid,"restore_ask"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_cancel"), "ap", style=S_DANGER)]]))
+            return
+
+        if data == "arestore_yes":
+            payload = pending_restore.pop(uid, None)
+            if not payload:
+                await cq.message.edit_text(t(uid,"restore_invalid"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_back"),"ap",style=S_DANGER)]]))
+                return
+            db.d = payload
+            db._migrate()  # backfill any fields the backup predates
+            db.save()
+            await cq.message.edit_text(t(uid,"restore_done"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_back"),"ap",style=S_DANGER)]]))
+            await log_event(cq.message.bot, f"📥 <b>Database restored from backup</b>\nBy: <code>{uid}</code>")
+            return
+
+        if data == "arestore_no":
+            pending_restore.pop(uid, None)
+            await cq.message.edit_text(t(uid,"restore_cancelled"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_back"),"ap",style=S_DANGER)]]))
+            return
+
+        # NEW: manual cleanup trigger (expired files + old trash) straight from the admin panel
+        if data == "a_cleanup":
+            expired = db.expired_file_ids()
+            for fid in expired:
+                f = db.get_file(fid)
+                if not f: continue
+                try: await cq.message.bot.delete_message(FILE_CHANNEL, f["message_id"])
+                except Exception: pass
+                db.del_file(fid)
+            purged = db.purge_old_trash(days=TRASH_RETENTION_DAYS)
+            for fid, f in purged:
+                try: await cq.message.bot.delete_message(FILE_CHANNEL, f["message_id"])
+                except Exception: pass
+            await cq.message.edit_text(t(uid,"cleanup_done", e=len(expired), tr=len(purged)), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(tb(uid,"b_back"),"ap",style=S_DANGER)]]))
+            await log_event(cq.message.bot, f"🧹 <b>Manual cleanup run</b>\nBy: <code>{uid}</code>\nExpired: {len(expired)} · Trash purged: {len(purged)}")
+            return
+
         if data == "aset":
             m = db.get_adel()
             await cq.message.edit_text(t(uid,"set_panel",t=bf("Bot Settings"),m=m), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn(f"◷ Auto-Delete: {m}m", "aset_ad", style=S_PRIMARY)],[btn(tb(uid,"b_back"), "ap", style=S_DANGER)]]))
@@ -2056,9 +2596,21 @@ async def do_broadcast(bot_obj: Bot, admin_uid: int, bc: dict, pin: bool):
 async def expiry_cleanup_loop(bot_obj: Bot):
     # NEW: periodically clean up expired files — deletes the stored channel
     # message (best-effort) and removes the DB record so storage doesn't grow
-    # unbounded. Runs forever in the background; errors never crash the bot.
+    # unbounded. Also purges old Trash and sends "expiring soon" notifications.
+    # Runs forever in the background; errors never crash the bot.
     while True:
         try:
+            # NEW: warn owners ~1hr before their file expires (only once per file)
+            for fid, f in db.soon_expiring(window_seconds=3600):
+                up = f.get("user_id")
+                db.mark_expiry_notified(fid)
+                if up and db.get_setting(up, "notify", True):
+                    try:
+                        await bot_obj.send_message(up, t(up, "notif_expiring",
+                            fn=esc(f.get("file_name","Untitled")),
+                            c=EXPIRY_LABELS.get(f.get("expiry_type","never"), "Never")))
+                    except Exception: pass
+
             for fid in db.expired_file_ids():
                 f = db.get_file(fid)
                 if not f: continue
@@ -2066,6 +2618,14 @@ async def expiry_cleanup_loop(bot_obj: Bot):
                 except Exception: pass
                 db.del_file(fid)
                 await log_event(bot_obj, f"⏳ <b>Expired file cleaned up</b>\n𖧷 {esc(f.get('file_name',''))}")
+
+            # NEW: permanently purge Trash items past their retention window
+            purged = db.purge_old_trash(days=TRASH_RETENTION_DAYS)
+            for fid, f in purged:
+                try: await bot_obj.delete_message(FILE_CHANNEL, f["message_id"])
+                except Exception: pass
+            if purged:
+                await log_event(bot_obj, f"🧹 <b>Auto-purged {len(purged)} trashed file(s)</b> (past {TRASH_RETENTION_DAYS}-day retention)")
         except Exception as e:
             log.error(f"expiry_cleanup_loop err: {e}")
         await asyncio.sleep(300)  # check every 5 minutes
