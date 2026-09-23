@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>RBX404 Digital File Hub</title>
+<link rel="stylesheet" href="/static/css/app.css">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand-row">
+    <div class="brand">RBX404<br><small>DIGITAL FILE HUB</small></div>
+    <div id="avatarBtn" style="font-size:22px">👤</div>
+  </div>
+</div>
+
+<!-- HOME -->
+<div class="page active" id="page-home">
+  <div class="card">
+    <div id="helloText" style="font-weight:700;font-size:15px">Hello 👋</div>
+    <div class="stats-grid" id="statsGrid"></div>
+  </div>
+  <div class="section-title" id="homeQuoteLabel">Search</div>
+  <input class="search" id="homeSearch" placeholder="🔍 Search files, folders...">
+  <div class="section-title">Recent Activity</div>
+  <div id="activityList"></div>
+</div>
+
+<!-- FILES -->
+<div class="page" id="page-files">
+  <input class="search" id="fileSearch" placeholder="🔍 Search your files...">
+  <div class="tabs" id="typeTabs">
+    <div class="tab active" data-type="">All</div>
+    <div class="tab" data-type="document">📄 Docs</div>
+    <div class="tab" data-type="video">🎥 Video</div>
+    <div class="tab" data-type="photo">🖼 Photo</div>
+    <div class="tab" data-type="audio">🎵 Audio</div>
+  </div>
+  <div id="filesList"></div>
+</div>
+
+<!-- FAVORITES -->
+<div class="page" id="page-favorites">
+  <div class="section-title">⭐ Favorites</div>
+  <div id="favList"></div>
+</div>
+
+<!-- COLLECTIONS -->
+<div class="page" id="page-collections">
+  <div class="row-gap" style="margin-bottom:12px">
+    <button class="btn" id="newCollectionBtn">📦 New Collection</button>
+  </div>
+  <div id="collectionsList"></div>
+</div>
+
+<!-- PROFILE -->
+<div class="page" id="page-profile">
+  <div class="card" id="profileCard"></div>
+  <div class="section-title">Settings</div>
+  <div class="card">
+    <div class="field">
+      <label>Language</label>
+      <select id="langSelect">
+        <option value="bn">🇧🇩 বাংলা</option>
+        <option value="en">🇬🇧 English</option>
+      </select>
+    </div>
+  </div>
+  <div class="section-title">More</div>
+  <div class="card" style="cursor:pointer" id="trashLink">🗑 Recycle Bin</div>
+  <div class="card" id="adminLinkWrap" style="display:none;cursor:pointer">👑 Admin Dashboard</div>
+</div>
+
+<!-- TRASH -->
+<div class="page" id="page-trash">
+  <div class="section-title">🗑 Recycle Bin</div>
+  <div id="trashNote" style="color:var(--muted);font-size:12px;margin-bottom:10px"></div>
+  <div id="trashList"></div>
+</div>
+
+<div class="bottom-nav">
+  <div class="nav-item active" data-page="home"><span class="ic">🏠</span>Home</div>
+  <div class="nav-item" data-page="files"><span class="ic">📁</span>Files</div>
+  <div class="nav-item" data-page="favorites"><span class="ic">⭐</span>Saved</div>
+  <div class="nav-item" data-page="collections"><span class="ic">📦</span>Packs</div>
+  <div class="nav-item" data-page="profile"><span class="ic">👤</span>Profile</div>
+</div>
+
+<div class="modal-bg" id="fileModalBg">
+  <div class="modal">
+    <span class="close-x" onclick="closeModal('fileModalBg')">✕</span>
+    <h3 id="fmName">File</h3>
+    <div id="fmMeta" style="color:var(--muted);font-size:12px;margin-bottom:14px"></div>
+    <div class="field"><label>Expiry</label>
+      <select id="fmExpiry">
+        <option value="never">Never</option>
+        <option value="1h">1 Hour</option>
+        <option value="1d">1 Day</option>
+        <option value="7d">7 Days</option>
+        <option value="30d">30 Days</option>
+      </select>
+    </div>
+    <div class="field"><label>Download limit (0 = unlimited)</label>
+      <input type="number" id="fmLimit" min="0" value="0">
+    </div>
+    <div class="field"><label>Password (blank = none)</label>
+      <input type="text" id="fmPassword" placeholder="optional">
+    </div>
+    <div class="row-gap" style="margin-bottom:8px">
+      <button class="btn secondary" id="fmOneTime">One-time: Off</button>
+      <button class="btn secondary" id="fmDisabled">Status: Active</button>
+    </div>
+    <button class="btn" id="fmSave">💾 Save Settings</button>
+    <div class="row-gap" style="margin-top:8px">
+      <button class="btn secondary" id="fmCopy">📋 Copy Link</button>
+      <button class="btn secondary" id="fmQr">▣ QR</button>
+    </div>
+    <button class="btn danger" id="fmTrash" style="margin-top:8px">🗑 Move to Trash</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>

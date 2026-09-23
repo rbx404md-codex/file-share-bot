@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>RBX404 Admin</title>
+<link rel="stylesheet" href="/static/css/app.css">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand-row">
+    <div class="brand">👑 RBX404<br><small>ADMIN DASHBOARD</small></div>
+  </div>
+</div>
+
+<div class="page active" id="page-home">
+  <div class="stats-grid" id="statsGrid"></div>
+</div>
+
+<div class="page" id="page-users">
+  <input class="search" id="userSearch" placeholder="🔍 Search users by name / id">
+  <div id="usersList"></div>
+</div>
+
+<div class="page" id="page-forcejoin">
+  <div class="card">
+    <div class="field"><label>Channel/group @username or -100id</label><input id="fjChatId"></div>
+    <div class="field"><label>Title</label><input id="fjTitle"></div>
+    <div class="field"><label>Invite URL</label><input id="fjUrl" placeholder="https://t.me/..."></div>
+    <button class="btn" id="fjAdd">➕ Add Requirement</button>
+  </div>
+  <div id="fjList"></div>
+</div>
+
+<div class="page" id="page-broadcast">
+  <div class="card">
+    <div class="field"><label>Audience</label>
+      <select id="bcAudience"><option value="all">All Users</option><option value="active">Active (not banned)</option></select>
+    </div>
+    <div class="field"><label>Message</label><input id="bcMessage" placeholder="Type your broadcast..."></div>
+    <button class="btn" id="bcSend">📢 Send</button>
+    <div id="bcStatus" class="file-meta" style="margin-top:10px"></div>
+  </div>
+</div>
+
+<div class="page" id="page-audit">
+  <div id="auditList"></div>
+</div>
+
+<div class="bottom-nav">
+  <div class="nav-item active" data-page="home"><span class="ic">📊</span>Stats</div>
+  <div class="nav-item" data-page="users"><span class="ic">👥</span>Users</div>
+  <div class="nav-item" data-page="forcejoin"><span class="ic">🔐</span>ForceJoin</div>
+  <div class="nav-item" data-page="broadcast"><span class="ic">📢</span>Broadcast</div>
+  <div class="nav-item" data-page="audit"><span class="ic">📜</span>Log</div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="/static/js/admin.js"></script>
+</body>
+</html>
