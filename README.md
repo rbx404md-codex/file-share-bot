@@ -170,3 +170,17 @@ For local Mini App testing, run a tunnel (`ngrok http 8080` or
   — the frontend never gets to just assert a user id.
 - Admin routes re-check `ADMIN_IDS` server-side on every request; the
   frontend showing/hiding an admin link is cosmetic only, not a security boundary.
+
+## 9. Bug fixes since first draft
+- **`/start` crash on some users (`can't parse entities: Unexpected end tag`)** —
+  the welcome message uses `ParseMode.HTML`, and a Telegram display name
+  containing `<`, `>`, or `&` (common with stylized/emoji names) broke
+  Telegram's HTML parser and made `/start` fail for that user. Fixed by
+  HTML-escaping every variable substituted into bot text (`app/bot/texts.py:t()`)
+  and the one place that built HTML outside of that helper (the collection
+  deep-link message in `handlers.py`).
+- Same class of bug existed on the **public share pages** (`/share/<token>`,
+  `/collection/<id>`) — a file or collection name containing HTML would have
+  been injected unescaped into the rendered page (a stored-XSS risk, not just
+  a crash, since there's no ParseMode to reject it there). Fixed by
+  HTML-escaping file/collection names and the page `<title>` in `app/web/share.py`.
