@@ -97,7 +97,8 @@ async def _resolve_deep_link(msg: Message, db: Database, lang: str, payload: str
             await msg.answer(t(lang, "file_gone"))
             return
         files = await db.collection_files(cid)
-        await msg.answer(f"📦 <b>{col['name']}</b>\n{len(files)} file(s)",
+        import html as _html
+        await msg.answer(f"📦 <b>{_html.escape(col['name'])}</b>\n{len(files)} file(s)",
                           reply_markup=main_menu_kb(lang, config.BASE_URL))
         for f in files[:20]:
             await deliver_file(msg, db, lang, f["id"], silent_header=True)

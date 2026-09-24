@@ -71,7 +71,13 @@ TEXTS = {
 def t(lang, key, **kw):
     lang = lang if lang in ("bn", "en") else "bn"
     s = TEXTS.get(key, {}).get(lang) or TEXTS.get(key, {}).get("en") or key
+    # Messages are always sent with ParseMode.HTML. Any variable being
+    # substituted in (user names, file names, channel titles, ...) must be
+    # HTML-escaped first, or a name containing "<" / "&" breaks Telegram's
+    # HTML parser and the whole message fails to send.
+    import html as _html
+    safe_kw = {k: (_html.escape(v) if isinstance(v, str) else v) for k, v in kw.items()}
     try:
-        return s.format(**kw)
+        return s.format(**safe_kw)
     except Exception:
         return s
