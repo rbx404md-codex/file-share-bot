@@ -37,3 +37,10 @@ def file_need_join_kb(lang, url):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📢 Join", url=url)],
     ])
+
+
+def duplicate_kb(lang, token):
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=t(lang, "use_existing"), callback_data=f"dupu:{token}"),
+        InlineKeyboardButton(text=t(lang, "upload_anyway"), callback_data=f"dupn:{token}"),
+    ]])

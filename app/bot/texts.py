@@ -53,6 +53,18 @@ TEXTS = {
     "admin_only": {"bn": "⛔ শুধু অ্যাডমিনদের জন্য।", "en": "⛔ Admins only."},
     "maintenance": {"bn": "🛠 বট রক্ষণাবেক্ষণের জন্য সাময়িক বন্ধ আছে।",
                      "en": "🛠 Bot is temporarily under maintenance."},
+    "enter_password": {"bn": "🔒 এই ফাইলটি পাসওয়ার্ড-সুরক্ষিত। পাসওয়ার্ড লিখে পাঠান:",
+                        "en": "🔒 This file is password-protected. Reply with the password:"},
+    "wrong_password": {"bn": "❌ ভুল পাসওয়ার্ড। আবার চেষ্টা করুন — লিংকে আবার ক্লিক করে।",
+                        "en": "❌ Wrong password. Tap the link again to retry."},
+    "dup_found": {
+        "bn": "⚠️ <b>একই নামের/সাইজের ফাইল আগেই আছে</b>\n\n📄 {name}\n💾 {size}\n\n"
+              "আগেরটা ব্যবহার করবেন নাকি নতুন করে আপলোড করবেন?",
+        "en": "⚠️ <b>Possible duplicate detected</b>\n\n📄 {name}\n💾 {size}\n\n"
+              "Use the existing one, or upload as new?",
+    },
+    "use_existing": {"bn": "♻️ আগেরটা ব্যবহার করুন", "en": "♻️ Use Existing"},
+    "upload_anyway": {"bn": "⬆️ নতুন করে আপলোড", "en": "⬆️ Upload Anyway"},
 }
 
 

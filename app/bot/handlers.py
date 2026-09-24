@@ -8,13 +8,20 @@ from aiogram.types import Message, CallbackQuery, BufferedInputFile, WebAppInfo,
 from app.config import config
 from app.database import Database
 from app.bot.texts import t
-from app.bot.keyboards import main_menu_kb, force_join_kb, file_result_kb, file_need_join_kb
-from app.bot.utils import get_ftype, extract_meta, fmt_size
+from app.bot.keyboards import (
+    main_menu_kb, force_join_kb, file_result_kb, file_need_join_kb, duplicate_kb,
+)
+from app.bot.utils import get_ftype, extract_meta, fmt_size, gen_short_token
 
 log = logging.getLogger("rbx404.bot")
 router = Router()
 
 _db: Database | None = None
+
+# In-memory, single-process state. Fine for a single Railway instance;
+# both clear themselves within minutes and are never treated as durable.
+_pending_password: dict[int, str] = {}        # uid -> file token awaiting a password reply
+_pending_dup: dict[str, dict] = {}             # short token -> pending-upload details
 
 
 def set_db(db: Database):
@@ -118,19 +125,29 @@ async def deliver_file(msg: Message, db: Database, lang: str, fid: str, silent_h
                 reply_markup=file_need_join_kb(lang, f"https://t.me/{str(f['force_join']).lstrip('@')}"),
             )
             return
+    if f.get("password"):
+        _pending_password[msg.from_user.id] = fid
+        await msg.answer(t(lang, "enter_password"))
+        return
 
+    await _do_deliver(msg, db, f)
+
+
+async def _do_deliver(msg: Message, db: Database, f: dict):
+    """Actual copy + counters, after every access check has already passed."""
     try:
         await msg.bot.copy_message(msg.chat.id, config.FILE_CHANNEL, f["message_id"])
     except Exception as e:
-        log.warning(f"deliver_file copy failed for {fid}: {e}")
+        log.warning(f"deliver_file copy failed for {f['id']}: {e}")
+        lang = await user_lang(db, msg.from_user.id)
         await msg.answer(t(lang, "file_gone"))
         return
 
-    await db.touch_view(fid)
-    await db.touch_download(fid)
+    await db.touch_view(f["id"])
+    await db.touch_download(f["id"])
     await db.inc_dl(f["user_id"])
     if f.get("one_time"):
-        await db.update_file(fid, disabled=1)
+        await db.update_file(f["id"], disabled=1)
 
 
 @router.message(Command("help"))
@@ -188,6 +205,53 @@ async def cb_qr(cq: CallbackQuery):
     await cq.answer()
 
 
+@router.callback_query(F.data.startswith("dupu:"))
+async def cb_dup_use_existing(cq: CallbackQuery):
+    db = get_db(cq.bot)
+    lang = await user_lang(db, cq.from_user.id)
+    token = cq.data.split(":", 1)[1]
+    pending = _pending_dup.pop(token, None)
+    if not pending:
+        await cq.answer()
+        return
+    try:
+        await cq.bot.delete_message(config.FILE_CHANNEL, pending["fwd_message_id"])
+    except Exception:
+        pass
+    existing = await db.get_file(pending["existing_fid"])
+    if not existing:
+        await cq.message.edit_text(t(lang, "file_gone"))
+        return
+    await cq.message.edit_text(
+        t(lang, "file_saved", name=existing["file_name"], size=fmt_size(existing["size"])),
+        reply_markup=file_result_kb(lang, config.BASE_URL, existing["id"], config.ENABLE_QR),
+    )
+    await cq.message.answer(f"<code>{config.BASE_URL}/share/{existing['id']}</code>")
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("dupn:"))
+async def cb_dup_upload_new(cq: CallbackQuery):
+    db = get_db(cq.bot)
+    lang = await user_lang(db, cq.from_user.id)
+    token = cq.data.split(":", 1)[1]
+    pending = _pending_dup.pop(token, None)
+    if not pending:
+        await cq.answer()
+        return
+    fid = await db.add_file(
+        uid=pending["uid"], message_id=pending["fwd_message_id"], file_name=pending["name"],
+        file_type=pending["ftype"], size=pending["size"], caption=pending.get("caption"),
+    )
+    await db.log_activity(pending["uid"], "upload", fid, pending["name"])
+    await cq.message.edit_text(
+        t(lang, "file_saved", name=pending["name"], size=fmt_size(pending["size"])),
+        reply_markup=file_result_kb(lang, config.BASE_URL, fid, config.ENABLE_QR),
+    )
+    await cq.message.answer(f"<code>{config.BASE_URL}/share/{fid}</code>")
+    await cq.answer()
+
+
 @router.message(F.content_type.in_({
     "document", "video", "photo", "audio", "voice", "animation", "sticker",
 }))
@@ -213,6 +277,19 @@ async def handle_upload(msg: Message):
         await msg.answer("❌ Storage channel isn't reachable — check FILE_CHANNEL / bot admin rights.")
         return
 
+    dup = await db.find_duplicate(msg.from_user.id, name, size)
+    if dup:
+        token = gen_short_token()
+        _pending_dup[token] = {
+            "uid": msg.from_user.id, "fwd_message_id": fwd.message_id, "ftype": ftype,
+            "name": name, "size": size, "caption": msg.caption, "existing_fid": dup["id"],
+        }
+        await msg.answer(
+            t(lang, "dup_found", name=name, size=fmt_size(size)),
+            reply_markup=duplicate_kb(lang, token),
+        )
+        return
+
     fid = await db.add_file(
         uid=msg.from_user.id, message_id=fwd.message_id, file_name=name,
         file_type=ftype, size=size, caption=msg.caption,
@@ -229,12 +306,26 @@ async def handle_upload(msg: Message):
 
 @router.message(F.text & ~F.text.startswith("/"))
 async def handle_text(msg: Message):
-    """Plain text messages become shareable "text file" items too (message->link)."""
     db = get_db(msg.bot)
     lang = await user_lang(db, msg.from_user.id)
     if await db.is_banned(msg.from_user.id):
         await msg.answer(t(lang, "banned"))
         return
+
+    # A reply to a "🔒 enter password" prompt takes priority over treating
+    # this text as a brand-new shareable message.
+    pending_fid = _pending_password.pop(msg.from_user.id, None)
+    if pending_fid:
+        f = await db.get_file(pending_fid)
+        if not f:
+            await msg.answer(t(lang, "file_gone"))
+            return
+        if (msg.text or "").strip() != (f.get("password") or ""):
+            await msg.answer(t(lang, "wrong_password"))
+            return
+        await _do_deliver(msg, db, f)
+        return
+
     ok, missing = await check_force_join(msg.bot, db, msg.from_user.id)
     if not ok:
         await msg.answer(t(lang, "not_verified"), reply_markup=force_join_kb(lang, missing))

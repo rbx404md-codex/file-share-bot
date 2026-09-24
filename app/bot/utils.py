@@ -51,6 +51,11 @@ def fmt_size(n: int) -> str:
     return f"{n:.1f} TB"
 
 
+def gen_short_token(n=8):
+    import random, string
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=n))
+
+
 def verify_webapp_init_data(init_data: str, bot_token: str, max_age_seconds: int = 86400):
     """
     Validates Telegram Mini App `initData` per Telegram's documented HMAC scheme.
