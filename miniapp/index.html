@@ -38,7 +38,24 @@
     <div class="tab" data-type="photo">🖼 Photo</div>
     <div class="tab" data-type="audio">🎵 Audio</div>
   </div>
+  <div class="row-gap" style="margin-bottom:10px;align-items:center">
+    <select class="field" id="folderFilter" style="flex:1;background:var(--card2);border:1px solid var(--border);
+      border-radius:10px;padding:10px 12px;color:var(--text);font-size:13px;">
+      <option value="__any__">📁 All Folders</option>
+      <option value="root">📂 Root (no folder)</option>
+    </select>
+    <button class="btn secondary" id="newFolderBtn" style="flex:0 0 auto;padding:10px 14px">➕</button>
+    <button class="btn secondary" id="selectModeBtn" style="flex:0 0 auto;padding:10px 14px">☑</button>
+  </div>
   <div id="filesList"></div>
+</div>
+
+<div class="bulk-bar" id="bulkBar">
+  <span id="bulkCount" style="font-size:12px;color:var(--muted)">0 selected</span>
+  <span onclick="bulkFavorite()">⭐</span>
+  <span onclick="openFolderPicker('bulk')">📁</span>
+  <span onclick="bulkTrash()">🗑</span>
+  <span onclick="exitSelectMode()" style="color:var(--red2)">✕</span>
 </div>
 
 <!-- FAVORITES -->
@@ -102,6 +119,9 @@
         <option value="30d">30 Days</option>
       </select>
     </div>
+    <div class="field"><label>Folder</label>
+      <select id="fmFolder"><option value="">📂 Root (no folder)</option></select>
+    </div>
     <div class="field"><label>Download limit (0 = unlimited)</label>
       <input type="number" id="fmLimit" min="0" value="0">
     </div>
@@ -118,6 +138,15 @@
       <button class="btn secondary" id="fmQr">▣ QR</button>
     </div>
     <button class="btn danger" id="fmTrash" style="margin-top:8px">🗑 Move to Trash</button>
+  </div>
+</div>
+
+<div class="modal-bg" id="folderPickerBg">
+  <div class="modal">
+    <span class="close-x" onclick="closeModal('folderPickerBg')">✕</span>
+    <h3>📁 Move to Folder</h3>
+    <div id="folderPickerList"></div>
+    <button class="btn secondary" onclick="pickFolder(null)" style="margin-top:6px">📂 Root (no folder)</button>
   </div>
 </div>
 
