@@ -41,7 +41,12 @@ const TYPE_ICON = {
 
 let ME = null;
 let currentType = "";
+let currentFolder = "__any__";
 let currentModalFile = null;
+let selectMode = false;
+let selectedIds = new Set();
+let folderPickerTarget = null; // 'bulk' | fileId
+let foldersCache = [];
 
 // ── navigation ──────────────────────────────────────────
 document.querySelectorAll(".nav-item").forEach(el => {
@@ -102,6 +107,18 @@ document.getElementById("homeSearch").addEventListener("keydown", e => {
 
 // ── files ───────────────────────────────────────────────
 function fileRowHtml(f) {
+  if (selectMode) {
+    const on = selectedIds.has(f.id);
+    return `
+      <div class="file-row selectable" data-id="${f.id}" onclick="toggleSelect('${f.id}')">
+        <div class="check-box ${on ? "on" : ""}">${on ? "✓" : ""}</div>
+        <div class="file-icon">${TYPE_ICON[f.type] || "📦"}</div>
+        <div class="file-info">
+          <div class="file-name">${esc(f.name)}</div>
+          <div class="file-meta">${f.size_h} · ${f.downloads} downloads${f.disabled ? " · ⛔ disabled" : ""}</div>
+        </div>
+      </div>`;
+  }
   return `
     <div class="file-row" data-id="${f.id}">
       <div class="file-icon">${TYPE_ICON[f.type] || "📦"}</div>
@@ -113,16 +130,95 @@ function fileRowHtml(f) {
     </div>`;
 }
 
+async function loadFolders() {
+  const data = await api("/api/folders?parent_id=root");
+  foldersCache = data.folders;
+  const opts = foldersCache.map(fo => `<option value="${fo.id}">📁 ${esc(fo.name)}</option>`).join("");
+  const filterSel = document.getElementById("folderFilter");
+  const keep = filterSel.value;
+  filterSel.innerHTML = `<option value="__any__">📁 All Folders</option><option value="root">📂 Root (no folder)</option>${opts}`;
+  filterSel.value = keep || "__any__";
+  const fmSel = document.getElementById("fmFolder");
+  fmSel.innerHTML = `<option value="">📂 Root (no folder)</option>${opts}`;
+}
+
 async function loadFiles() {
+  if (!foldersCache.length) await loadFolders().catch(() => {});
   const q = document.getElementById("fileSearch").value.trim();
   const params = new URLSearchParams({ pp: 50 });
   if (currentType) params.set("type", currentType);
   if (q) params.set("q", q);
+  if (currentFolder !== "__any__") params.set("folder_id", currentFolder);
   const data = await api("/api/files?" + params.toString());
   const el = document.getElementById("filesList");
   el.innerHTML = data.files.length
     ? data.files.map(fileRowHtml).join("")
     : `<div class="empty">📭 No files here yet.<br>Send anything to the bot to create one.</div>`;
+}
+
+document.getElementById("folderFilter").addEventListener("change", e => {
+  currentFolder = e.target.value;
+  loadFiles();
+});
+document.getElementById("newFolderBtn").addEventListener("click", async () => {
+  const name = prompt("Folder name:");
+  if (!name) return;
+  await api("/api/folders", { method: "POST", body: JSON.stringify({ name }) });
+  await loadFolders();
+  toast("📁 Folder created");
+});
+
+// ── bulk select ─────────────────────────────────────────
+document.getElementById("selectModeBtn").addEventListener("click", () => {
+  selectMode = !selectMode;
+  document.getElementById("selectModeBtn").style.color = selectMode ? "var(--red2)" : "";
+  if (!selectMode) exitSelectMode(false);
+  else { document.getElementById("bulkBar").classList.add("show"); loadFiles(); }
+});
+function toggleSelect(fid) {
+  if (selectedIds.has(fid)) selectedIds.delete(fid); else selectedIds.add(fid);
+  document.getElementById("bulkCount").textContent = `${selectedIds.size} selected`;
+  loadFiles();
+}
+function exitSelectMode(reload = true) {
+  selectMode = false;
+  selectedIds.clear();
+  document.getElementById("selectModeBtn").style.color = "";
+  document.getElementById("bulkBar").classList.remove("show");
+  if (reload) loadFiles();
+}
+async function bulkFavorite() {
+  if (!selectedIds.size) return;
+  await Promise.all([...selectedIds].map(fid => api(`/api/files/${fid}/favorite`, { method: "POST" })));
+  toast(`⭐ Favorited ${selectedIds.size} file(s)`);
+  exitSelectMode();
+}
+async function bulkTrash() {
+  if (!selectedIds.size) return;
+  if (!confirm(`Move ${selectedIds.size} file(s) to Trash?`)) return;
+  await Promise.all([...selectedIds].map(fid => api(`/api/files/${fid}/trash`, { method: "POST" })));
+  toast(`🗑 Trashed ${selectedIds.size} file(s)`);
+  exitSelectMode();
+}
+
+// ── folder picker modal (shared: bulk move + single-file modal shortcut) ──
+async function openFolderPicker(target) {
+  if (target === "bulk" && !selectedIds.size) return;
+  folderPickerTarget = target;
+  if (!foldersCache.length) await loadFolders().catch(() => {});
+  document.getElementById("folderPickerList").innerHTML = foldersCache.map(fo => `
+    <div class="folder-pick-row" onclick="pickFolder('${fo.id}')">📁 ${esc(fo.name)}</div>
+  `).join("") || `<div class="empty">No folders yet — create one first.</div>`;
+  openModal("folderPickerBg");
+}
+async function pickFolder(folderId) {
+  closeModal("folderPickerBg");
+  if (folderPickerTarget === "bulk") {
+    await Promise.all([...selectedIds].map(fid =>
+      api(`/api/files/${fid}`, { method: "PATCH", body: JSON.stringify({ folder_id: folderId }) })));
+    toast(`📁 Moved ${selectedIds.size} file(s)`);
+    exitSelectMode();
+  }
 }
 
 document.getElementById("fileSearch").addEventListener("input", debounce(loadFiles, 350));
@@ -154,11 +250,13 @@ async function toggleFav(el, fid, isFav) {
 async function openFileModal(fid) {
   const f = await api(`/api/files/${fid}`);
   currentModalFile = f;
+  if (!foldersCache.length) await loadFolders().catch(() => {});
   document.getElementById("fmName").textContent = f.name;
   document.getElementById("fmMeta").textContent =
     `${f.size_h} · ${f.type} · ${f.views} views · ${f.downloads} downloads`;
   document.getElementById("fmExpiry").value =
     ["never", "1h", "1d", "7d", "30d"].includes(f.expiry_type) ? f.expiry_type : "never";
+  document.getElementById("fmFolder").value = f.folder_id || "";
   document.getElementById("fmLimit").value = f.download_limit || 0;
   document.getElementById("fmPassword").value = "";
   document.getElementById("fmOneTime").textContent = "One-time: " + (f.one_time ? "On" : "Off");
@@ -189,6 +287,7 @@ document.getElementById("fmSave").addEventListener("click", async () => {
     download_limit: parseInt(document.getElementById("fmLimit").value || "0", 10),
     one_time: document.getElementById("fmOneTime").dataset.v === "1",
     disabled: document.getElementById("fmDisabled").dataset.v === "1",
+    folder_id: document.getElementById("fmFolder").value || null,
   };
   const pw = document.getElementById("fmPassword").value;
   if (pw) body.password = pw;
