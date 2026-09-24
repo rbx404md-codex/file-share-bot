@@ -102,8 +102,11 @@ For local Mini App testing, run a tunnel (`ngrok http 8080` or
 - Recycle bin: trash / restore / permanent delete / auto-purge after
   `TRASH_RETENTION_DAYS`
 - QR code per file (bot button + Mini App + public share page)
+- Duplicate-upload detection (name+size heuristic) with "Use Existing /
+  Upload Anyway" choice
 - Public branded share landing page at `/share/<token>` and `/collection/<id>`
-- Mini App: home dashboard, file manager with search/type filters, favorites,
+- Mini App: home dashboard, file manager with search/type/folder filters,
+  folder create + move (single-file and multi-select bulk move), favorites,
   collections, trash, profile, language switch (bn/en)
 - Admin dashboard (Mini App): platform stats, user search/ban/unban,
   force-join management, broadcast with live sent/failed/blocked counts,
@@ -114,31 +117,38 @@ For local Mini App testing, run a tunnel (`ngrok http 8080` or
 - `/health` endpoint, graceful startup validation, structured logging
 
 ## 6. Known limitations / not built (be upfront about these)
-- **Duplicate-file detection (hashing)** — not implemented. Doing this
-  safely on large files needs streaming hashes; left as a follow-up rather
-  than shipped half-working.
+- **Duplicate-file detection** — implemented as a **name + size match**, not a
+  true content hash. The Bot API doesn't expose raw bytes for large files, so
+  a real hash would mean downloading every upload first; this heuristic
+  catches the common "oops, sent this again" case without that cost.
 - **Per-notification-type toggles** — there's a single `notify` on/off per
   user, not the full itemized list from the spec (download/expiry/etc each
   toggled separately).
 - **Referral links / custom emoji** — not implemented; low value versus
   everything else, cut to keep the core solid.
-- **Bulk multi-select actions in the Mini App** — the API supports doing
-  these one file at a time; a checkbox multi-select UI isn't built yet.
+- **Bulk multi-select** — ✅ done: tap ☑ on the Files page to select
+  multiple files, then bulk-favorite / bulk-move-to-folder / bulk-trash from
+  the bottom action bar.
 - **PostgreSQL** — schema is SQLite-specific; migrating to Postgres later
   is possible but not wired up (spec allows SQLite-only, so this is by design).
-- Password-protected links store the **password field on the file record**
-  but the bot's delivery flow (`deliver_file`) does not yet prompt for it
-  before sending — currently it's stored/settable from the Mini App but not
-  enforced at delivery time. Treat this as a stub, not a working gate, until
-  that check is added.
+- **Password-protected links** — now enforced: `deliver_file` prompts for the
+  password in the bot chat before copying the file, and rejects a wrong one.
+  This lives in an in-memory dict (`_pending_password`), so it only works
+  within a single running process — fine for Railway's default one-instance
+  setup, but won't survive a restart mid-prompt (the user just taps the link
+  again) and won't work if you ever scale to multiple instances without a
+  shared store (e.g. Redis) instead.
 
 ## 7. Testing checklist
 - [ ] `/start` (fresh user) → welcome + Mini App button
 - [ ] `/start` with force-join channels configured → verification screen → Verify
 - [ ] Upload a document/video/photo → link + QR + settings button all work
+- [ ] Upload the exact same file (same name+size) again → duplicate prompt appears → try both "Use Existing" and "Upload Anyway"
+- [ ] Set a password on a file from the Mini App → open its `/start f_<token>` link → bot asks for password → wrong password rejected, correct one delivers the file
+- [ ] Create a folder in the Mini App, move a file into it via the file modal's Folder dropdown, filter Files by that folder
+- [ ] Enter Select mode (☑), select 2+ files, try Favorite / Move to Folder / Trash from the bulk bar
 - [ ] Open Mini App → Home stats load, Files list loads, search/filter works
 - [ ] Favorite / unfavorite a file
-- [ ] Create a folder, move a file into it (via `PATCH /api/files/{id}`)
 - [ ] Create a public collection, open its `/collection/<id>` page
 - [ ] Trash a file → appears in Recycle Bin → Restore → back in Files
 - [ ] Permanently delete a trashed file → gone from channel + DB
