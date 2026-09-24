@@ -1,3 +1,4 @@
+import html as _html
 import io
 from aiohttp import web
 from app.config import config
@@ -34,7 +35,7 @@ body{{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,
 
 
 def render(title, body):
-    return PAGE_TMPL.format(title=title, brand=config.BRAND_NAME, body=body)
+    return PAGE_TMPL.format(title=_html.escape(title), brand=config.BRAND_NAME, body=body)
 
 
 @routes.get("/share/{token}")
@@ -52,8 +53,9 @@ async def share_page(request):
         '<div class="meta"><span>🔒 Protected</span><span>password required in bot</span></div>'
         if f.get("password") else ""
     )
+    safe_name = _html.escape(f["file_name"])
     body = f"""
-    <div class="fname">📦 {f['file_name']}</div>
+    <div class="fname">📦 {safe_name}</div>
     <div class="meta"><span>Size</span><span>{fmt_size(f['size'])}</span></div>
     <div class="meta"><span>Downloads</span><span>{limit_txt}</span></div>
     <div class="meta"><span>Status</span><span class="status">🟢 Available</span></div>
@@ -61,7 +63,7 @@ async def share_page(request):
     <a class="btn" href="https://t.me/{request.app['bot_username']}?start=f_{token}">OPEN IN TELEGRAM</a>
     <div class="foot">Secured by {config.BRAND_NAME}</div>
     """
-    return web.Response(text=render(f['file_name'], body), content_type="text/html")
+    return web.Response(text=render(f["file_name"], body), content_type="text/html")
 
 
 @routes.get("/collection/{cid}")
@@ -73,13 +75,14 @@ async def collection_page(request):
         html = '<div class="fname">😕</div><p class="err">Collection not found or private.</p>'
         return web.Response(text=render("Not found", html), content_type="text/html", status=404)
     files = await db.collection_files(cid)
+    safe_name = _html.escape(col["name"])
     body = f"""
-    <div class="fname">📦 {col['name']}</div>
+    <div class="fname">📦 {safe_name}</div>
     <div class="meta"><span>Files</span><span>{len(files)}</span></div>
     <a class="btn" href="https://t.me/{request.app['bot_username']}?start=c_{cid}">OPEN IN TELEGRAM</a>
     <div class="foot">Secured by {config.BRAND_NAME}</div>
     """
-    return web.Response(text=render(col['name'], body), content_type="text/html")
+    return web.Response(text=render(col["name"], body), content_type="text/html")
 
 
 @routes.get("/share/{token}/qr.png")
