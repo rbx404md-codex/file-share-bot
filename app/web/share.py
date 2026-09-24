@@ -48,11 +48,16 @@ async def share_page(request):
 
     await db.touch_view(token)
     limit_txt = "Unlimited" if not f["download_limit"] else f"{f['downloads']}/{f['download_limit']}"
+    lock_note = (
+        '<div class="meta"><span>🔒 Protected</span><span>password required in bot</span></div>'
+        if f.get("password") else ""
+    )
     body = f"""
     <div class="fname">📦 {f['file_name']}</div>
     <div class="meta"><span>Size</span><span>{fmt_size(f['size'])}</span></div>
     <div class="meta"><span>Downloads</span><span>{limit_txt}</span></div>
     <div class="meta"><span>Status</span><span class="status">🟢 Available</span></div>
+    {lock_note}
     <a class="btn" href="https://t.me/{request.app['bot_username']}?start=f_{token}">OPEN IN TELEGRAM</a>
     <div class="foot">Secured by {config.BRAND_NAME}</div>
     """
